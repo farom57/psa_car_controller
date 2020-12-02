@@ -16,8 +16,9 @@ import psa_connectedcar as psac
 from psa_connectedcar import ApiClient
 from psa_connectedcar.rest import ApiException
 from MyLogger import logger
+from threading import Semaphore, Timer
+from functools import wraps
 
-MQTT_REQ_TOPIC = "psa/RemoteServices/from/cid/"
 
 oauhth_url = {"clientsB2CPeugeot":"https://idpcvs.peugeot.com/am/oauth2/access_token",
               "clientsB2CCitroen":"https://idpcvs.citroen.com/am/oauth2/access_token",
@@ -29,9 +30,28 @@ authorize_service = "https://api.mpsa.com/api/connectedcar/v2/oauth/authorize"
 remote_url = "https://api.groupe-psa.com/connectedcar/v4/virtualkey/remoteaccess/token?client_id="
 scopes = ['openid profile']
 MQTT_SERVER = "mwa.mpsa.com"
-MQTT_EVENT_TOPIC = "psa/RemoteServices/events/MPHRTServices/"
+MQTT_REQ_TOPIC = "psa/RemoteServices/from/cid/"
 MQTT_RESP_TOPIC = "psa/RemoteServices/to/cid/"
+MQTT_EVENT_TOPIC = "psa/RemoteServices/events/MPHRTServices/"
 
+
+def rate_limit(limit, every):
+    def limit_decorator(fn):
+        semaphore = Semaphore(limit)
+
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            semaphore.acquire()
+            try:
+                return fn(*args, **kwargs)
+            finally:  # don't catch but ensure semaphore release
+                timer = Timer(every, semaphore.release)
+                timer.setDaemon(True)  # allows the timer to be canceled on exit
+                timer.start()
+
+        return wrapper
+
+    return limit_decorator
 
 class OpenIdCredentialManager(CredentialManager):
     def _grant_password_request(self, login: str, password: str, realm: str) -> dict:
@@ -311,6 +331,7 @@ class MyPSACC:
         logger.info(msg)
         self.mqtt_client.publish(MQTT_REQ_TOPIC + self.customer_id + "/Lights", msg)
 
+    @rate_limit(3, 60 * 20)
     def wakeup(self, vin):
         logger.info("ask wakeup to "+vin)
         msg = self.mqtt_request(vin, {"action": "state"})
