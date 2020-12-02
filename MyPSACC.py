@@ -7,6 +7,8 @@ from datetime import datetime
 from http import HTTPStatus
 from json import JSONEncoder
 from hashlib import md5
+from time import sleep
+
 from oauth2_client.credentials_manager import CredentialManager, ServiceInformation
 import paho.mqtt.client as mqtt
 from requests import Response
@@ -14,6 +16,8 @@ import psa_connectedcar as psac
 from psa_connectedcar import ApiClient
 from psa_connectedcar.rest import ApiException
 from MyLogger import logger
+
+MQTT_REQ_TOPIC = "psa/RemoteServices/from/cid/"
 
 oauhth_url = {"clientsB2CPeugeot":"https://idpcvs.peugeot.com/am/oauth2/access_token",
               "clientsB2CCitroen":"https://idpcvs.citroen.com/am/oauth2/access_token",
@@ -25,6 +29,9 @@ authorize_service = "https://api.mpsa.com/api/connectedcar/v2/oauth/authorize"
 remote_url = "https://api.groupe-psa.com/connectedcar/v4/virtualkey/remoteaccess/token?client_id="
 scopes = ['openid profile']
 MQTT_SERVER = "mwa.mpsa.com"
+MQTT_EVENT_TOPIC = "psa/RemoteServices/events/MPHRTServices/"
+MQTT_RESP_TOPIC = "psa/RemoteServices/to/cid/"
+
 
 class OpenIdCredentialManager(CredentialManager):
     def _grant_password_request(self, login: str, password: str, realm: str) -> dict:
@@ -195,9 +202,9 @@ class MyPSACC:
     def on_mqtt_connect(self, client, userdata, rc, a):
         try:
             logger.info("Connected with result code " + str(rc))
-            topics = ["psa/RemoteServices/to/cid/" + self.customer_id + "/#"]
+            topics = [MQTT_RESP_TOPIC + self.customer_id + "/#"]
             for vin in self.getVIN():
-                topics.append("psa/RemoteServices/events/MPHRTServices/" + vin + "/#")
+                topics.append(MQTT_EVENT_TOPIC+ vin + "/#")
             for topic in topics:
                 client.subscribe(topic)
                 logger.info("subscribe to " + topic)
@@ -215,18 +222,25 @@ class MyPSACC:
 
     def on_mqtt_message(self, client, userdata, msg):
         logger.info(f"mqtt msg {msg.topic} {str(msg.payload)}")
-        try:
-            data = json.loads(msg.payload)
-            if data["return_code"] == "0":
-                return
-            elif data["return_code"] == "400":
-                self.manager._refresh_token()
-                self.refresh_remote_token()
-                logger.info("retry last request")
-            else:
-                logger.error(f'{data["return_code"]} : {data["reason"]}')
-        except:
-            logger.debug("mqtt msg hasn't return code")
+        data = json.loads(msg.payload)
+        if msg.topic.startswith(MQTT_RESP_TOPIC):
+            try:
+                if data["return_code"] == "0":
+                    return
+                elif data["return_code"] == "400":
+                    self.manager._refresh_token()
+                    self.refresh_remote_token()
+                    logger.info("retry last request")
+                else:
+                    logger.error(f'{data["return_code"]} : {data["reason"]}')
+            except:
+                logger.debug("mqtt msg hasn't return code")
+        elif msg.topic.startswith(MQTT_EVENT_TOPIC):
+            # fix charge beginning without status api being updated
+            if data["charging_state"]['remaining_time'] != 0 and data["charging_state"]['rate'] == 0:
+                logger.info("charge begin")
+                sleep(60)
+                self.wakeup(data["vin"])
 
     def start_mqtt(self):
         self.refresh_remote_token()
@@ -271,7 +285,7 @@ class MyPSACC:
         # todo consider actual state before change the hour
         msg = self.mqtt_request(vin, {"program": {"hour": hour, "minute": miinute}, "type": charge_type})
         logger.info(msg)
-        self.mqtt_client.publish("psa/RemoteServices/from/cid/" + self.customer_id + "/VehCharge", msg)
+        self.mqtt_client.publish(MQTT_REQ_TOPIC + self.customer_id + "/VehCharge", msg)
 
     def change_charge_hour(self, vin, hour, miinute):
         # todo consider actual state before change the hour
@@ -290,18 +304,18 @@ class MyPSACC:
     def horn(self, vin, count):
         msg = self.mqtt_request(vin, {"nb_horn": count, "action": "activate"})
         logger.info(msg)
-        self.mqtt_client.publish("psa/RemoteServices/from/cid/" + self.customer_id + "/Horn", msg)
+        self.mqtt_client.publish(MQTT_REQ_TOPIC + self.customer_id + "/Horn", msg)
 
     def lights(self, vin, duration: int):
         msg = self.mqtt_request(vin, {"action": "activate", "duration": duration})
         logger.info(msg)
-        self.mqtt_client.publish("psa/RemoteServices/from/cid/" + self.customer_id + "/Lights", msg)
+        self.mqtt_client.publish(MQTT_REQ_TOPIC + self.customer_id + "/Lights", msg)
 
     def wakeup(self, vin):
         logger.info("ask wakeup to "+vin)
         msg = self.mqtt_request(vin, {"action": "state"})
         logger.info(msg)
-        self.mqtt_client.publish("psa/RemoteServices/from/cid/" + self.customer_id + "/VehCharge/state", msg)
+        self.mqtt_client.publish(MQTT_REQ_TOPIC + self.customer_id + "/VehCharge/state", msg)
         return True
 
     def lock_door(self, vin, lock: bool):
@@ -312,7 +326,7 @@ class MyPSACC:
 
         msg = self.mqtt_request(vin, {"action": value})
         logger.info(msg)
-        self.mqtt_client.publish("psa/RemoteServices/from/cid/" + self.customer_id + "/Doors", msg)
+        self.mqtt_client.publish(MQTT_REQ_TOPIC + self.customer_id + "/Doors", msg)
         return True
 
     def preconditioning(self, vin, activate: bool):
@@ -326,11 +340,11 @@ class MyPSACC:
             "program3": {"day": [0, 0, 0, 0, 0, 0, 0], "hour": 34, "minute": 7, "on": 0},
             "program4": {"day": [0, 0, 0, 0, 0, 0, 0], "hour": 34, "minute": 7, "on": 0}}})
         logger.info(msg)
-        self.mqtt_client.publish("psa/RemoteServices/from/cid/" + self.customer_id + "/ThermalPrecond", msg)
+        self.mqtt_client.publish(MQTT_REQ_TOPIC + self.customer_id + "/ThermalPrecond", msg)
         return True
 
     def save_config(self, name="config.json", force=False):
-        config_str = json.dumps(self, cls=MyPuegeotEncoder, sort_keys=True, indent=4).encode("utf8")
+        config_str = json.dumps(self, cls=MyPeugeotEncoder, sort_keys=True, indent=4).encode("utf8")
         new_hash = md5(config_str).hexdigest()
         if force or self._confighash != new_hash:
             with open(name, "wb") as f:
@@ -344,7 +358,7 @@ class MyPSACC:
             return MyPSACC(**json.loads(str))
 
 
-class MyPuegeotEncoder(JSONEncoder):
+class MyPeugeotEncoder(JSONEncoder):
     def default(self, mp: MyPSACC):
         data = copy(mp.__dict__)
         mpd = {}
