@@ -85,7 +85,7 @@ def parse_args():
 
 if __name__ == "__main__":
     if sys.version_info < (3, 6):
-        raise RuntimeError("This application requres Python 3.6+")
+        raise RuntimeError("This application requires Python 3.6+")
     parser = parse_args()
     args = parser.parse_args()
     my_logger(handler_level=args.debug)

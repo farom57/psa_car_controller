@@ -241,7 +241,7 @@ class MyPSACC:
         return self.mqtt_client.is_connected()
 
     def mqtt_request(self, vin, req_parameters):
-        date = datetime.now()
+        date = datetime.utcnow()
         date_f = "%Y-%m-%dT%H:%M:%SZ"
         date_str = date.strftime(date_f)
         data = {"access_token": self.remote_access_token, "customer_id": self.customer_id,
@@ -298,6 +298,7 @@ class MyPSACC:
         self.mqtt_client.publish("psa/RemoteServices/from/cid/" + self.customer_id + "/Lights", msg)
 
     def wakeup(self, vin):
+        logger.info("ask wakeup to "+vin)
         msg = self.mqtt_request(vin, {"action": "state"})
         logger.info(msg)
         self.mqtt_client.publish("psa/RemoteServices/from/cid/" + self.customer_id + "/VehCharge/state", msg)

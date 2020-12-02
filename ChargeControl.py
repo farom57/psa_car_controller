@@ -88,6 +88,10 @@ class ChargeControl:
                 level = res.energy[0]["level"]
                 logger.info(f"charging status of {self.vin} is {status}, battery level: {level}")
                 if status == "InProgress":
+                    # force update if the car doesn't send info during 10 minutes
+                    last_update = datetime.strptime(res.energy[0]['updatedAt'], "%Y-%m-%dT%H:%M:%SZ")
+                    if (last_update - datetime.utcnow()).total_seconds() > 60 * 10:
+                        self.psacc.wakeup(self.vin)
                     if (level >= self.percentage_threshold and self.retry_count < 2) or stop_charge:
                         self.psacc.charge_now(self.vin,False)
                         self.retry_count += 1
