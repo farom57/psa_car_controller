@@ -33,7 +33,7 @@ MQTT_SERVER = "mwa.mpsa.com"
 MQTT_REQ_TOPIC = "psa/RemoteServices/from/cid/"
 MQTT_RESP_TOPIC = "psa/RemoteServices/to/cid/"
 MQTT_EVENT_TOPIC = "psa/RemoteServices/events/MPHRTServices/"
-
+MQTT_TOKEN_TTL = 890
 
 def rate_limit(limit, every):
     def limit_decorator(fn):
@@ -153,6 +153,9 @@ class MyPSACC:
                         "x-introspect-realm": realm,
                         "accept": "application/hal+json",
                     }
+        self.remote_token_last_update = None
+        self._record_enabled = False
+
     def refresh_token(self):
         self.manager._refresh_token()
 
@@ -175,6 +178,8 @@ class MyPSACC:
         # retry
         if res is None:
             res = self.api().get_vehicle_status(self.get_vehicle_id_with_vin(vin))
+        if self._record_enabled:
+            self.record_position(vin, res)
         return res
 
     # monitor doesn't seem to work
@@ -209,7 +214,12 @@ class MyPSACC:
         self.remote_refresh_token = data["refresh_token"]
         return res
 
-    def refresh_remote_token(self):
+    def refresh_remote_token(self, force=False):
+        self.manager._refresh_token()
+        if not force and self.remote_token_last_update is not None:
+            last_update: datetime = self.remote_token_last_update
+            if (datetime.now()-last_update).total_seconds() < MQTT_TOKEN_TTL:
+                return
         res = self.manager.post(remote_url + self.client_id,
                                 json={"grant_type": "refresh_token", "refresh_token": self.remote_refresh_token},
                                 headers=self.headers)
@@ -217,6 +227,7 @@ class MyPSACC:
         logger.debug(f"refresh_remote_token: {data}")
         self.remote_access_token = data["access_token"]
         self.remote_refresh_token = data["refresh_token"]
+        self.remote_token_last_update = datetime.now()
         return data["access_token"], data["refresh_token"]
 
     def on_mqtt_connect(self, client, userdata, rc, a):
@@ -248,9 +259,8 @@ class MyPSACC:
                 if data["return_code"] == "0":
                     return
                 elif data["return_code"] == "400":
-                    self.manager._refresh_token()
-                    self.refresh_remote_token()
-                    logger.info("retry last request")
+                    self.refresh_remote_token(force=True)
+                    logger.error("retry last request, token was expired")
                 else:
                     logger.error(f'{data["return_code"]} : {data["reason"]}')
             except:
@@ -275,6 +285,7 @@ class MyPSACC:
         return self.mqtt_client.is_connected()
 
     def mqtt_request(self, vin, req_parameters):
+        self.refresh_token()
         date = datetime.utcnow()
         date_f = "%Y-%m-%dT%H:%M:%SZ"
         date_str = date.strftime(date_f)
@@ -373,11 +384,48 @@ class MyPSACC:
             self._confighash = new_hash
             logger.info("save config change")
 
+    @staticmethod
     def load_config(name="config.json"):
         with open(name, "r") as f:
             str = f.read()
             return MyPSACC(**json.loads(str))
 
+    def set_record(self,value:bool):
+        self._record_enabled = value
+
+    def record_position(self,vin, res:psac.models.status.Status):
+        import sqlite3
+        conn = sqlite3.connect('info.db')
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS position (Timestamp DATETIME PRIMARY KEY, VIN TEXT, longitude REAL, latitude REAL);")
+
+        longitude, latitude = res.last_position.geometry.coordinates
+        date = res.last_position.properties.updated_at
+        e = None
+        try:
+            conn.execute("INSERT INTO position(Timestamp,VIN,longitude,latitude) VALUES(?,?,?,?)",
+                         (date, vin, longitude, latitude))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            logger.debug("position already saved")
+        finally:
+            conn.close()
+
+    def get_recorded_position(self):
+        import sqlite3
+        from geojson import Feature, Point, FeatureCollection
+        from geojson import dumps as geo_dumps
+        conn = sqlite3.connect('info.db')
+        conn.row_factory = sqlite3.Row
+        res = conn.execute('SELECT * FROM position ORDER BY Timestamp');
+        features_list = []
+        for row in res:
+            print(row)
+            feature = Feature(geometry=Point((row["longitude"], row["latitude"])),
+                              properties={"vin": row["vin"], "date": row["Timestamp"]})
+            features_list.append(feature)
+        feature_collection = FeatureCollection(features_list)
+        return geo_dumps(feature_collection, sort_keys=True)
 
 class MyPeugeotEncoder(JSONEncoder):
     def default(self, mp: MyPSACC):
