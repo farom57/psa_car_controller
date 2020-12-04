@@ -399,7 +399,8 @@ class MyPSACC:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS position (Timestamp DATETIME PRIMARY KEY, VIN TEXT, longitude REAL, latitude REAL);")
 
-        longitude, latitude = res.last_position.geometry.coordinates
+        longitude = res.last_position.geometry.coordinates[0]
+        latitude = res.last_position.geometry.coordinates[1]
         date = res.last_position.properties.updated_at
         e = None
         try:
